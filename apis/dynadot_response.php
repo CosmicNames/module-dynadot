@@ -6,13 +6,14 @@ class DynadotResponse
      * @var SimpleXMLElement The XML parsed response from the API
      */
     private $xml;
+
     /**
      * @var string The raw response from the API
      */
     private $raw;
 
     /**
-     * Initializes the Namesilo Response
+     * Initializes the Dynadot Response
      *
      * @param string $response The raw XML response data from an API request
      */
@@ -35,7 +36,7 @@ class DynadotResponse
     public function response($assoc = false)
     {
         if ($this->xml && $this->xml instanceof SimpleXMLElement) {
-            return $this->formatResponse($this->xml->reply, $assoc);
+            return $this->formatResponse($this->xml, $assoc);
         }
         return null;
     }
@@ -47,7 +48,7 @@ class DynadotResponse
     public function responseXML()
     {
         if ($this->xml && $this->xml instanceof SimpleXMLElement) {
-            return $this->xml->reply;
+            return $this->xml;
         }
         return null;
     }
@@ -61,7 +62,7 @@ class DynadotResponse
     {
         # To do: add status codes
         if ($this->xml && $this->xml instanceof SimpleXMLElement) {
-            return (string)$this->xml->reply->code;
+            return (string)$this->xml->code;
         }
         return null;
     }

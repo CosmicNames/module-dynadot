@@ -2,6 +2,10 @@
 
 use Blesta\Core\Util\Common\Traits\Container;
 
+require_once dirname(__FILE__) . DIRECTORY_SEPARATOR . 'dynadot_response.php';
+require_once dirname(__FILE__) . DIRECTORY_SEPARATOR . 'commands' . DIRECTORY_SEPARATOR . 'domains.php';
+
+
 /**
  * Dynadot API processor
  * 

@@ -1,0 +1,31 @@
+<?php
+        $this->Widget->clear();
+        $this->Widget->create($this->_('Dynadot.add_row.box_title', true));
+        ?>
+        <div class="inner">
+            <?php
+            $this->Form->create();
+            ?>
+            <div class="title_row first">
+                <h3><?php $this->_('Dynadot.add_row.basic_title'); ?></h3>
+            </div>
+            <div class="pad">
+                <ul>
+                    <li>
+                        <?php
+                        $this->Form->label($this->_('Dynadot.row_meta.api_key', true), 'api_key');
+                        $this->Form->fieldText('api_key', (isset($vars->api_key) ? $vars->api_key : null), ['id' => 'api_key']);
+                        ?>
+                    </li>
+                    <?php $this->Form->fieldHidden('dynadot_module', true); ?>
+                </ul>
+            </div>
+
+            <div class="button_row"><a class="btn btn-primary float-right submit" href="#"><?php $this->_('Dynadot.add_row.add_btn'); ?></a></div>
+            <?php
+            $this->Form->end();
+            ?>
+        </div>
+        <?php
+        $this->Widget->end();
+        ?>
