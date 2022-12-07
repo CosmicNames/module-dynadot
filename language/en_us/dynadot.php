@@ -1,7 +1,7 @@
 <?php
 // Basics
 $lang['Dynadot.name'] = 'Dynadot';
-$lang['Dynadot.description'] = 'Dynadot';
+$lang['Dynadot.description'] = 'Dynadot is an ICANN accredited domain name registrar and web host.';
 
 // Module Management
 $lang['Dynadot.add_module_row'] = 'Add Account';
