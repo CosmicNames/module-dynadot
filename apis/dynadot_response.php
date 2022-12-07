@@ -2,101 +2,54 @@
 
 class DynadotResponse 
 {
-     /**
-     * @var SimpleXMLElement The XML parsed response from the API
-     */
-    private $xml;
-
-    /**
-     * @var string The raw response from the API
-     */
+    private $status;
     private $raw;
+    private $response;
+    private $errors;
+    private $headers;
 
     /**
-     * Initializes the Dynadot Response
+     * InternetbsResponse constructor.
      *
-     * @param string $response The raw XML response data from an API request
+     * @param array $api_response The API response
      */
-    public function __construct($response)
+    public function __construct(array $api_response)
     {
-        $this->raw = $response;
+        $this->raw = $api_response['content'];
+        $this->response = json_decode($api_response['content']);
+        $this->headers = $api_response['headers'];
 
-        try {
-            $this->xml = new SimpleXMLElement($this->raw);
-        } catch (Exception $e) {
-            // Invalid response
+        // Set status
+        $this->status = '400';
+        if (isset($this->headers[0])) {
+            $status_parts = explode(' ', $this->headers[0]);
+            if (isset($status_parts[1])) {
+                $this->status = (int) $status_parts[1];
+            }
+        }
+
+        // Set errors
+        $this->errors = [];
+        if ($this->response->Response->ResponseCode == -1 && isset($this->response->Response->Error)) {
+            $this->status = (int) $this->response->code ?? 500;
+            $this->errors[$this->status] = $this->response->Response->Error;
         }
     }
 
     /**
-     * Returns the CommandResponse
+     * Get the status of this response
      *
-     * @return stdClass A stdClass object representing the CommandResponses, null if invalid response
-     */
-    public function response($assoc = false)
-    {
-        if ($this->xml && $this->xml instanceof SimpleXMLElement) {
-            return $this->formatResponse($this->xml, $assoc);
-        }
-        return null;
-    }
-
-    /**
-     * Returns the CommandResponse in XML
-     * @return SimpleXMLElement A SimpleXMLElement object representing the CommandResponses, null if invalid response
-     */
-    public function responseXML()
-    {
-        if ($this->xml && $this->xml instanceof SimpleXMLElement) {
-            return $this->xml;
-        }
-        return null;
-    }
-
-    /**
-     * Returns the status of the API Responses
-     *
-     * @return string The status (300 = success)
+     * @return string The status of this response
      */
     public function status()
     {
-        # To do: add status codes
-        if ($this->xml && $this->xml instanceof SimpleXMLElement) {
-            return (string)$this->xml->code;
-        }
-        return null;
+        return $this->status;
     }
 
     /**
-     * Returns all errors contained in the response
+     * Get the raw data from this response
      *
-     * @return stdClass A stdClass object representing the errors in the response, false if invalid response
-     */
-    public function errors()
-    {
-        if ($this->xml && $this->xml instanceof SimpleXMLElement) {
-            return $this->formatResponse($this->xml->reply->detail);
-        }
-        return false;
-    }
-
-    /**
-     * Returns all warnings contained in the response
-     *
-     * @return stdClass A stdClass object representing the warnings in the response, false if invalid response
-     */
-    public function warnings()
-    {
-        if ($this->xml && $this->xml instanceof SimpleXMLElement) {
-            return $this->formatResponse($this->xml->Warnings);
-        }
-        return false;
-    }
-
-    /**
-     * Returns the raw response
-     *
-     * @return string The raw response
+     * @return string The raw data from this response
      */
     public function raw()
     {
@@ -104,58 +57,32 @@ class DynadotResponse
     }
 
     /**
-     * Formats the given $data into a stdClass object by first JSON encoding, then JSON decoding it
+     * Get the data response from this response
      *
-     * @param mixed $data The data to convert to a stdClass object
-     * @return stdClass $data in a stdClass object form
+     * @return stdClass The data response from this response
      */
-    private function formatResponse($data, $assoc = false)
+    public function response()
     {
-        $data = json_decode(json_encode($data));
-        $data = $this->formatAttributes($data);
-
-        return json_decode(json_encode($data), $assoc);
+        return $this->response;
     }
 
     /**
-     * Formats the SimpleXML parsed response, removing @attributes
+     * Get any errors from this response
      *
-     * @param stdClass $attributes The object to format
-     * @return stdClass A stdClass object with the attributes properly formatted
+     * @return string The errors from this response
      */
-    private function formatAttributes($attributes)
+    public function errors()
     {
-        foreach ($attributes as $key => $attribute) {
-            if (is_array($attribute)) {
-                $attributes->{$key} = $this->formatAttributes((object)$attribute);
-                $attributes->{$key} = (array)$attributes->{$key};
-            }
+        return $this->errors;
+    }
 
-            if (is_object($attribute)) {
-                $attributes->{$key} = $this->formatAttributes($attribute);
-
-                if (isset($attribute->{'@attributes'})) {
-                    unset($attributes->{$key}->{'@attributes'});
-                }
-            }
-
-            if (isset($attributes->{$key}) && !is_scalar($attributes->{$key})) {
-                foreach ($attributes->{$key} as $a_key => $items) {
-                    if (!is_scalar($items)) {
-                        if (count((array) $items) == 1 && is_array($attributes->{$key})) {
-                            $attributes->{$key}[$a_key] = $items->{0};
-                        }
-
-                        if (count((array) $items) == 1 && is_object($attributes->{$key})) {
-                            if (isset($items->{0})) {
-                                $attributes->{$key}->{$a_key} = $items->{0};
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        return $attributes;
+    /**
+     * Get the headers returned with this response
+     *
+     * @return string The headers returned with this response
+     */
+    public function headers()
+    {
+        return $this->headers;
     }
 }

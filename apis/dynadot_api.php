@@ -5,7 +5,6 @@ use Blesta\Core\Util\Common\Traits\Container;
 require_once dirname(__FILE__) . DIRECTORY_SEPARATOR . 'dynadot_response.php';
 require_once dirname(__FILE__) . DIRECTORY_SEPARATOR . 'commands' . DIRECTORY_SEPARATOR . 'domains.php';
 
-
 /**
  * Dynadot API processor
  * 
@@ -17,7 +16,7 @@ class DynadotApi
     // Load traits
     use Container;
 
-    const LIVE_URL = 'https://api.dynadot.com/api3.xml';
+    const LIVE_URL = 'https://api.dynadot.com/api3.json';
 
     /**
      * @var string The api key to use when executing API commands
@@ -53,7 +52,7 @@ class DynadotApi
      * @param array $args An array of key/value pair arguments to submit to the given API command
      * @return DynadotResponse The response object
      */
-    public function submit($command, array $args = [])
+    public function submit($command, array $args = [], string $method = 'GET')
     {
         $url = self::LIVE_URL;
         /*if ($this->sandbox) {
@@ -62,6 +61,9 @@ class DynadotApi
 
         $url .= '?key=' . $this->key .'&command=' . $command;
 
+        if (count($args) > 0) {
+            $url .= '&' . http_build_query($args);
+        }
         $this->last_request = [
             'url' => $url,
             'args' => $args
@@ -70,8 +72,7 @@ class DynadotApi
         $ch = curl_init();
         curl_setopt($ch, CURLOPT_URL, $url);
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_POSTFIELDS, $args);
-        curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'POST');
+        curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
 
         if (Configure::get('Blesta.curl_verify_ssl')) {
             curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
@@ -83,14 +84,27 @@ class DynadotApi
 
         $response = curl_exec($ch);
 
-        if ($response == false) {
+        if (curl_errno($ch) || !$response) {
+            $error = [
+                'error' => 'Curl Error',
+                'message' => 'An internal error occurred, or the server did not respond to the request.',
+                'status' => 500
+            ];
             $this->logger->error(curl_error($ch));
+
+            return new DynadotResponse(['content' => json_encode($error), 'headers' => []]);
         }
 
         $this->httpcode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         curl_close($ch);
 
-        return new DynadotResponse($response);
+        $data = explode("\n", $response);
+
+        // Return request response
+        return new DynadotResponse([
+                'content' => $data[count($data) - 1],
+                'headers' => array_splice($data, 0, count($data) - 1)]
+        );
     }
 
     /**

@@ -7,7 +7,7 @@
  * @license http://opensource.org/licenses/mit-license.php MIT License
  * @package dynadot.commands
  */
-class DynadotDomains 
+class DynadotDomains
 {
     /**
      * @var DynadotApi
@@ -22,5 +22,12 @@ class DynadotDomains
     public function __construct(DynadotApi $api)
     {
         $this->api = $api;
+    }
+
+    public function getTLDPricing($currency = 'USD'): DynadotResponse
+    {
+        return $this->api->submit('tld_price', [
+            'currency' => $currency
+        ]);
     }
 }
