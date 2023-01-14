@@ -69,7 +69,7 @@ class DynadotResponse
     /**
      * Get any errors from this response
      *
-     * @return string The errors from this response
+     * @return array The errors from this response
      */
     public function errors()
     {

@@ -24,6 +24,13 @@ class DynadotDomains
         $this->api = $api;
     }
 
+    public function check($domain): DynadotResponse
+    {
+        return $this->api->submit('search', [
+            'domain0' => $domain
+        ]);
+    }
+
     public function getTLDPricing($currency = 'USD'): DynadotResponse
     {
         return $this->api->submit('tld_price', [

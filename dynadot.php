@@ -213,6 +213,88 @@ class Dynadot extends RegistrarModule
         return new DynadotApi($key);
     }
 
+    /**
+     * Process API response, setting an errors, and logging the request
+     *
+     * @param DynadotApi $api The Dynadot API object
+     * @param DynadotResponse $response The Dynadot API response object
+     */
+    private function processResponse(DynadotApi $api, DynadotResponse $response)
+    {
+        $this->logRequest($api, $response);
+
+        $status = $response->status();
+
+        // Set errors if non-200 http code
+        if ($api->httpcode != 200) {
+            $this->Input->setErrors(['errors' => ['API returned non-200 HTTP code']]);
+        }
+
+        // Set errors, if any
+        $errors = $response->errors();
+        if (count($errors) > 0) {
+            $this->Input->setErrors(['errors' => (array)$errors]);
+        }
+    }
+
+    /**
+     * Logs the API request
+     *
+     * @param DynadotApi $api The Dynadot API object
+     * @param DynadotResponse $response The Dynadot API response object
+     */
+    private function logRequest(DynadotApi $api, DynadotResponse $response)
+    {
+        $last_request = $api->lastRequest();
+        $url = substr($last_request['url'], 0, strpos($last_request['url'], '?'));
+        $this->log($url, serialize($last_request['args']), 'input', true);
+        $this->log($url, serialize($response->response()), 'output', $api->httpcode == 200);
+    }
+
+    /**
+     * Returns the TLD of the given domain
+     *
+     * @param string $domain The domain to return the TLD from
+     * @param stdClass module row object
+     * @return string The TLD of the domain
+     */
+    private function getTld($domain, $row = null)
+    {
+        if ($row == null) {
+            $row = $this->getRow();
+        }
+
+        if ($row == null) {
+            $row = $this->getRow();
+        }
+
+        $tlds = $this->getTlds();
+        $domain = strtolower($domain);
+
+        foreach ($tlds as $tld) {
+            if (substr($domain, -strlen($tld)) == $tld) {
+                return $tld;
+            }
+        }
+
+        return strstr($domain, '.');
+    }
+
+    /**
+     * Formats a phone number into +NNN.NNNNNNNNNN
+     *
+     * @param string $number The phone number
+     * @param string $country The ISO 3166-1 alpha2 country code
+     * @return string The number in +NNN.NNNNNNNNNN
+     */
+    private function formatPhone($number, $country)
+    {
+        if (!isset($this->Contacts)) {
+            Loader::loadModels($this, ['Contacts']);
+        }
+
+        return $this->Contacts->intlNumber($number, $country, '.');
+    }
 
     /**
      * Adds the module row on the remote server. Sets Input errors on failure,
@@ -288,6 +370,130 @@ class Dynadot extends RegistrarModule
 
             return $meta;
         }
+    }
+
+    /**
+     * Returns all fields used when adding/editing a package, including any
+     * javascript to execute when the page is rendered with these fields.
+     *
+     * @param $vars stdClass A stdClass object representing a set of post fields
+     * @return ModuleFields A ModuleFields object, containg the fields to render as well as any additional
+     *  HTML markup to include
+     */
+    public function getPackageFields($vars = null)
+    {
+        Loader::loadHelpers($this, ['Html']);
+
+        // Fetch all packages available for the given server or server group
+        $module_row = null;
+        if (isset($vars->module_group) && $vars->module_group == '') {
+            if (isset($vars->module_row) && $vars->module_row > 0) {
+                $module_row = $this->getModuleRow($vars->module_row);
+            } else {
+                $rows = $this->getModuleRows();
+                if (isset($rows[0])) {
+                    $module_row = $rows[0];
+                }
+                unset($rows);
+            }
+        } else {
+            // Fetch the 1st server from the list of servers in the selected group
+            $rows = $this->getModuleRows(isset($vars->module_group) ? $vars->module_group : null);
+            if (isset($rows[0])) {
+                $module_row = $rows[0];
+            }
+            unset($rows);
+        }
+
+        $fields = new ModuleFields();
+
+        $types = [
+            'domain' => Language::_('Dynadot.package_fields.type_domain', true),
+        ];
+
+        // Set type of package
+        $type = $fields->label(
+            Language::_('Dynadot.package_fields.type', true),
+            'dynadot_type'
+        );
+        $type->attach(
+            $fields->fieldSelect(
+                'meta[type]',
+                $types,
+                (isset($vars->meta['type']) ? $vars->meta['type'] : null),
+                ['id' => 'dynadot_type']
+            )
+        );
+        $fields->setField($type);
+
+        // Set all TLD checkboxes
+        $tld_options = $fields->label(Language::_('Dynadot.package_fields.tld_options', true));
+
+        $tlds = $this->getTlds();
+        sort($tlds);
+
+        foreach ($tlds as $tld) {
+            $tld_label = $fields->label($tld, 'tld_' . $tld);
+            $tld_options->attach(
+                $fields->fieldCheckbox(
+                    'meta[tlds][]',
+                    $tld,
+                    (isset($vars->meta['tlds']) && in_array($tld, $vars->meta['tlds'])),
+                    ['id' => 'tld_' . $tld],
+                    $tld_label
+                )
+            );
+        }
+        $fields->setField($tld_options);
+
+        $epp_code_label = $fields->label(Language::_('Dynadot.package_fields.epp_code', true));
+        $epp_code_label->attach(
+            $fields->fieldCheckbox(
+                'meta[epp_code]',
+                '1',
+                $vars->meta['epp_code'] ?? '0' == '1',
+                ['id' => 'epp_code'],
+                $fields->label(Language::_('Dynadot.package_fields.enable_epp_code', true), 'epp_code')
+            )
+        );
+        $fields->setField($epp_code_label);
+
+        // Set nameservers
+        for ($i = 1; $i <= 5; $i++) {
+            $type = $fields->label(Language::_('Dynadot.package_fields.ns' . $i, true), 'dynadot_ns' . $i);
+            $type->attach(
+                $fields->fieldText(
+                    'meta[ns][]',
+                    (isset($vars->meta['ns'][$i - 1]) ? $vars->meta['ns'][$i - 1] : null),
+                    ['id' => 'dynadot_ns' . $i]
+                )
+            );
+            $fields->setField($type);
+        }
+
+        $fields->setHtml(
+            "
+            <script type=\"text/javascript\">
+                $(document).ready(function() {
+                    toggleTldOptions($('#dynadot_type').val());
+
+                    // Re-fetch module options
+                    $('#dynadot_type').change(function() {
+                        toggleTldOptions($(this).val());
+                    });
+
+                    function toggleTldOptions(type) {
+                        if (type == 'ssl')
+                            $('.dynadot_tlds').hide();
+                        else
+                            $('.dynadot_tlds').show();
+                    }
+                });
+            </script>
+        "
+        );
+
+        return $fields;
     }
 
 
@@ -502,6 +708,60 @@ class Dynadot extends RegistrarModule
         return false;
     }
 
+    /**
+     * Verifies that the provided domain name is available
+     *
+     * @param string $domain The domain to lookup
+     * @param int $module_row_id The ID of the module row to fetch for the current module
+     * @return bool True if the domain is available, false otherwise
+     */
+    public function checkAvailability($domain, $module_row_id = null)
+    {
+        $row = $this->getModuleRow($module_row_id);
+        $api = $this->getApi($row->meta->api_key);
+
+        $domains = new DynadotDomains($api);
+        $result = $domains->check($domain);
+        $this->processResponse($api, $result);
+
+        if ($api->httpcode != 200) {
+            return false;
+        }
+
+        $checkResults = $result->response();
+
+        // if unsuccessful, return false
+        if ($checkResults->SearchResponse->ResponseCode == -1) {
+            return false;
+        }
+
+        // if available, return true
+        if ($checkResults->SearchResponse->SearchResults[0]->Available === "yes") {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Gets the domain name from the given service
+     *
+     * @param stdClass $service The service from which to extract the domain name
+     * @return string The domain name associated with the service
+     */
+    public function getServiceDomain($service)
+    {
+        if (isset($service->fields)) {
+            foreach ($service->fields as $service_field) {
+                if ($service_field->key == 'domain') {
+                    return $service_field->value;
+                }
+            }
+        }
+
+        return $this->getServiceName($service);
+    }
+
 
       /**
      * Get a list of the TLDs supported by the registrar module
@@ -511,6 +771,9 @@ class Dynadot extends RegistrarModule
      */
     public function getTlds($module_row_id = null)
     {
+        $row = $this->getModuleRow($module_row_id);
+        $row = !empty($row) ? $row : $this->getModuleRows()[0];
+
         // Fetch the TLDs results from the cache, if they exist
         $cache = Cache::fetchCache(
             'tlds',
@@ -518,50 +781,43 @@ class Dynadot extends RegistrarModule
         );
 
         if ($cache) {
-            $response = unserialize(base64_decode($cache));
+            return unserialize(base64_decode($cache));
         }
 
-        if (!isset($response)) {
-            try {
-                $row = $this->getModuleRow($module_row_id);
-                if (!$row) {
-                    $rows = $this->getModuleRows();
-                    if (isset($rows[0])) {
-                        $row = $rows[0];
-                    }
-                    unset($rows);
-                }
+        // Fetch Dynadot TLDs
+        $tlds = [];
 
-                $api = $this->getApi($row->meta->api_key);
-                $domainApi = new DynadotDomains($api);
-                $result = $domainApi->getTLDPricing();
-                $tlds = $result->response();
-                $response = [];
+        if (empty($row)) {
+            return $tlds;
+        }
 
-                foreach ($tlds->TldPriceResponse->TldPrice as $tld) {
-                    $response[] = $tld->Tld;
-                }
+        $api = $this->getApi($row->meta->api_key);
+        $domains = new DynadotDomains($api);
+        $result = $domains->getTLDPricing();
+        $response = $result->response();
 
-                // Save TLDs in cache
-                if (Configure::get('Caching.on') && is_writable(CACHEDIR)) {
-                    try {
-                        Cache::writeCache(
-                            'tlds',
-                            base64_encode(serialize($response)),
-                            strtotime(Configure::get('Blesta.cache_length')) - time(),
-                            Configure::get('Blesta.company_id') . DS . 'modules' . DS . 'dynadot' . DS
-                        );
-                    } catch (Exception $e) {
-                        // Write to cache failed, so disable caching
-                        Configure::set('Caching.on', false);
-                    }
+        foreach ($response->TldPriceResponse->TldPrice as $tld) {
+            $tlds[] = $tld->Tld;
+        }
+
+        if (count($tlds) > 0) {
+            // Save TLDs in cache
+            if (Configure::get('Caching.on') && is_writable(CACHEDIR)) {
+                try {
+                    Cache::writeCache(
+                        'tlds',
+                        base64_encode(serialize($tlds)),
+                        strtotime(Configure::get('Blesta.cache_length')) - time(),
+                        Configure::get('Blesta.company_id') . DS . 'modules' . DS . 'dynadot' . DS
+                    );
+                } catch (Exception $e) {
+                    // Write to cache failed, so disable caching
+                    Configure::set('Caching.on', false);
                 }
-            } catch (Throwable $e) {
-                $response = Configure::get('Dynadot.tlds');
             }
         }
 
-        return (array) $response;
+        return $tlds;
     }
 
     /**
@@ -641,8 +897,8 @@ class Dynadot extends RegistrarModule
         if (!isset($result)) {
             $row = $this->getRow();
             $api = $this->getApi($row->meta->api_key);
-            $domainApi = new DynadotDomains($api);
-            $result = $domainApi->getTLDPricing()->response();
+            $domains = new DynadotDomains($api);
+            $result = $domains->getTLDPricing()->response();
 
             // Save the TLDs results to the cache
             if (

@@ -55,15 +55,13 @@ class DynadotApi
     public function submit($command, array $args = [], string $method = 'GET')
     {
         $url = self::LIVE_URL;
-        /*if ($this->sandbox) {
-            $url = self::SANDBOX_URL;
-        }*/
 
         $url .= '?key=' . $this->key .'&command=' . $command;
 
         if (count($args) > 0) {
             $url .= '&' . http_build_query($args);
         }
+
         $this->last_request = [
             'url' => $url,
             'args' => $args
