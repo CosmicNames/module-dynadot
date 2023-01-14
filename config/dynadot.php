@@ -123,3 +123,5 @@ Configure::set('Dynadot.whois_fields', [
         'lp' => 'email',
     ],
 ]);
+
+require_once __DIR__ . '/notices.php';

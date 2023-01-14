@@ -1285,7 +1285,7 @@ class Dynadot extends RegistrarModule
             }
 
             if (isset($post['action']) && $post['action'] == 'sync_date') {
-                Loader::loadModels($this, ['Services']);
+                Loader::loadModels($this, ['Services', 'Domains.DomainsDomains']);
 
                 $domain_info = $domains->getDomainInfo($fields->domain);
                 $this->processResponse($api, $domain_info);
@@ -1293,8 +1293,11 @@ class Dynadot extends RegistrarModule
                 if (!$this->Input->errors()) {
                     $domain_info = $domain_info->response();
                     $expires = $domain_info->DomainInfoResponse->DomainInfo->Expiration;
-                    $edit_vars['date_renews'] = date('Y-m-d h:i:s', strtotime($expires));
+                    $created = $domain_info->DomainInfoResponse->DomainInfo->Registration;
+                    $edit_vars['date_added'] = date('Y-m-d h:i:s', ($created / 1000));
+                    $edit_vars['date_renews'] = date('Y-m-d h:i:s', ($expires / 1000));
                     $this->Services->edit($service->id, $edit_vars, $bypass_module = true);
+                    $this->DomainsDomains->setExpirationDate($service->id, $edit_vars['date_renews']);
                 }
             }
         }
@@ -1576,9 +1579,11 @@ class Dynadot extends RegistrarModule
             return false;
         }
 
+        $expires = $response->DomainInfoResponse->DomainInfo->Expiration;
+
         return $this->Date->format(
             $format,
-            isset($response->DomainInfoResponse->DomainInfo->Expiration) ? $response->DomainInfoResponse->DomainInfo->Expiration : date('c')
+            ($expires / 1000) ?? date('c')
         );
     }
 
