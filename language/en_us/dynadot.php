@@ -130,6 +130,8 @@ $lang['Dynadot.service_fields.domain'] = 'Domain';
 
 
 // Package Fields
+$lang['Dynadot.package_fields.type'] = 'Type';
+$lang['Dynadot.package_fields.type_domain'] = 'Domain Registration';
 $lang['Dynadot.package_fields.epp_code'] = 'EPP Code';
 $lang['Dynadot.package_fields.ns1'] = 'Nameserver 1';
 $lang['Dynadot.package_fields.ns2'] = 'Nameserver 2';

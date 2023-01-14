@@ -264,10 +264,6 @@ class Dynadot extends RegistrarModule
             $row = $this->getRow();
         }
 
-        if ($row == null) {
-            $row = $this->getRow();
-        }
-
         $tlds = $this->getTlds();
         $domain = strtolower($domain);
 
@@ -371,6 +367,348 @@ class Dynadot extends RegistrarModule
             return $meta;
         }
     }
+
+    /**
+     * Adds the service to the remote server. Sets Input errors on failure,
+     * preventing the service from being added.
+     *
+     * @param stdClass $package A stdClass object representing the selected package
+     * @param array $vars An array of user supplied info to satisfy the request
+     * @param stdClass $parent_package A stdClass object representing the parent service's selected package
+     *  (if the current service is an addon service)
+     * @param stdClass $parent_service A stdClass object representing the parent service of the service being added
+     *  (if the current service is an addon service and parent service has already been provisioned)
+     * @param string $status The status of the service being added. These include:
+     *
+     *  - active
+     *  - canceled
+     *  - pending
+     *  - suspended
+     * @return array A numerically indexed array of meta fields to be stored for this service containing:
+     *
+     *  - key The key for this meta field
+     *  - value The value for this key
+     *  - encrypted Whether or not this field should be encrypted (default 0, not encrypted)
+     * @see Module::getModule()
+     * @see Module::getModuleRow()
+     */
+    public function addService(
+        $package,
+        array $vars = null,
+        $parent_package = null,
+        $parent_service = null,
+        $status = 'pending'
+    )
+    {
+        $row = $this->getModuleRow($package->module_row);
+        $api = $this->getApi($row->meta->api_key);
+
+        #
+        # TODO: Handle validation checks
+        # TODO: Fix nameservers
+        #
+
+        if (isset($vars['domain'])) {
+            $tld = $this->getTld($vars['domain'], $row);
+            $vars['domain'] = trim($vars['domain']);
+        }
+
+        $input_fields = array_merge(
+            Configure::get('Dynadot.domain_fields'),
+            (array) Configure::get('Dynadot.domain_fields' . $tld),
+            (array) Configure::get('Dynadot.nameserver_fields'),
+            (array) Configure::get('Dynadot.transfer_fields'),
+            ['duration' => true, 'transfer' => $vars['transfer'] ?? 1, 'private' => 0]
+        );
+
+        // Set the whois privacy field based on the config option
+        if (isset($vars['configoptions']['id_protection'])) {
+            $vars['private'] = $vars['configoptions']['id_protection'];
+        }
+
+        // .ca and .us domains can't have traditional whois privacy
+        if ($tld == '.ca' || $tld == '.us') {
+            unset($input_fields['private']);
+        }
+
+        if (isset($vars['use_module']) && $vars['use_module'] == 'true') {
+            if ($package->meta->type == 'domain') {
+                $vars['duration'] = 1;
+
+                foreach ($package->pricing as $pricing) {
+                    if ($pricing->id == $vars['pricing_id']) {
+                        $vars['duration'] = $pricing->term;
+                        break;
+                    }
+                }
+
+                $whois_fields = Configure::get('Dynadot.whois_fields');
+
+                // Set all whois info from client ($vars['client_id'])
+                if (!isset($this->Clients)) {
+                    Loader::loadModels($this, ['Clients']);
+                }
+
+                if (!isset($this->Contacts)) {
+                    Loader::loadModels($this, ['Contacts']);
+                }
+
+                $client = $this->Clients->get($vars['client_id']);
+
+                if ($client) {
+                    $contact_numbers = $this->Contacts->getNumbers($client->contact_id);
+                }
+
+                $whoisContact = [];
+
+                foreach ($whois_fields as $key => $value) {
+                    if (str_contains($key, 'phonenum')) {
+                        $whoisContact[$value['rp']] = $this->formatPhone(
+                            isset($contact_numbers[0]) ? $contact_numbers[0]->number : null,
+                            $client->country
+                        );
+                    } else {
+                        $whoisContact[$value['rp']] =
+                            (isset($value['lp']) && !empty($value['lp'])) ? $client->{$value['lp']} : 'NA';
+                    }
+                }
+
+                $fields = array_intersect_key($vars, $input_fields);
+
+                // update name for contact creation
+                $whoisContact['name'] = $whoisContact['fn'] .' '. $whoisContact['ln'];
+
+                unset($whoisContact['fn']);
+                unset($whoisContact['ln']);
+
+                // create a contact
+                $domains = new DynadotDomains($api);
+                $response = $domains->addContacts($whoisContact);
+                $this->processResponse($api, $response);
+                if ($this->Input->errors()) {
+                    return;
+                }
+                $fields['contact_id'] = $response->response()->CreateContactResponse->CreateContactContent->ContactId;
+
+                // Handle transfer
+                if (isset($vars['auth']) && $vars['auth']) {
+                    $transfer = new DynadotDomainsTransfer($api);
+
+                    $response = $transfer->create($fields);
+                    $this->processResponse($api, $response);
+
+                    if ($this->Input->errors()) {
+                        if (isset($vars['contact_id'])) {
+                            $domains->deleteContacts($vars['contact_id']);
+                        }
+
+                        return;
+                    }
+                } else {
+                    // Handle registration
+                    $domains = new DynadotDomains($api);
+
+                    $private = $fields['private'];
+                    unset($fields['private']);
+
+                    $response = $domains->create($fields);
+                    $this->processResponse($api, $response);
+
+                    if ($this->Input->errors()) {
+                        // if namesilo is running a promotion on registrations we have to work around their system if
+                        // we are doing a multi-year registration
+                        $error = 'Invalid number of years, or no years provided.';
+                        if (reset($this->Input->errors()['errors']) === $error) {
+                            // unset the errors since we are working around it
+                            $this->Input->setErrors([]);
+
+                            // set the registration length to 1 year and save the remainder for an extension
+                            $total_years = $fields['years'];
+                            $fields['duration'] = 1;
+                            $response = $domains->create($fields);
+                            $this->processResponse($api, $response);
+
+                            // now extend the remainder of the years
+                            $fields['duration'] = $total_years - 1;
+                            $response = $domains->renew($fields);
+                            $this->processResponse($api, $response);
+                        }
+
+                        if (isset($vars['contact_id'])) {
+                            $domains->deleteContacts($vars['contact_id']);
+                        }
+
+                        return;
+                    }
+
+                    if (!$private) {
+                        $response = $domains->removePrivacy($fields['domain']);
+                        $this->processResponse($api, $response);
+                    }
+                }
+            }
+        }
+
+        $meta = [];
+        $fields = array_intersect_key($vars, $input_fields);
+        foreach ($fields as $key => $value) {
+            $meta[] = [
+                'key' => $key,
+                'value' => $value,
+                'encrypted' => 0
+            ];
+        }
+
+        return $meta;
+    }
+
+    /**
+     * Edits the service on the remote server. Sets Input errors on failure,
+     * preventing the service from being edited.
+     *
+     * @param stdClass $package A stdClass object representing the current package
+     * @param stdClass $service A stdClass object representing the current service
+     * @param array $vars An array of user supplied info to satisfy the request
+     * @param stdClass $parent_package A stdClass object representing the parent service's selected package
+     *  (if the current service is an addon service)
+     * @param stdClass $parent_service A stdClass object representing the parent service of the service being edited
+     *  (if the current service is an addon service)
+     * @return array A numerically indexed array of meta fields to be stored for this service containing:
+     *
+     *  - key The key for this meta field
+     *  - value The value for this key
+     *  - encrypted Whether or not this field should be encrypted (default 0, not encrypted)
+     * @see Module::getModule()
+     * @see Module::getModuleRow()
+     */
+    public function editService($package, $service, array $vars = [], $parent_package = null, $parent_service = null)
+    {
+        $row = $this->getModuleRow($package->module_row);
+        $api = $this->getApi($row->meta->api_key);
+        $domains = new DynadotDomains($api);
+
+        // Manually renew the domain
+        $renew = isset($vars['renew']) ? (int) $vars['renew'] : 0;
+        if ($renew > 0 && $vars['use_module'] == 'true') {
+            $this->renewService($package, $service, $parent_package, $parent_service, $renew);
+            unset($vars['renew']);
+        }
+
+        // Handle whois privacy via config option
+        $id_protection = $this->featureServiceEnabled('id_protection', $service);
+        if (!$id_protection && isset($vars['configoptions']['id_protection'])) {
+            $response = $domains->addPrivacy($this->getServiceDomain($service));
+            $this->processResponse($api, $response);
+        } elseif ($id_protection && !isset($vars['configoptions']['id_protection'])) {
+            $response = $domains->removePrivacy($this->getServiceDomain($service));
+            $this->processResponse($api, $response);
+        }
+
+        return null; // All this handled by admin/client tabs instead
+    }
+
+    /**
+     * Cancels the service on the remote server. Sets Input errors on failure,
+     * preventing the service from being canceled.
+     */
+    public function cancelService($package, $service, $parent_package = null, $parent_service = null)
+    {
+        $row = $this->getModuleRow($package->module_row);
+        $api = $this->getApi($row->meta->api_key);
+
+        if ($package->meta->type == 'domain') {
+            $fields = $this->serviceFieldsToObject($service->fields);
+
+            $domains = new DynadotDomains($api);
+            $response = $domains->setAutoRenewal($fields->{'domain'}, false);
+            $this->processResponse($api, $response);
+
+            if ($this->Input->errors()) {
+                return;
+            }
+        }
+
+        return;
+    }
+
+    /**
+     * Suspends the service on the remote server. Sets Input errors on failure,
+     * preventing the service from being suspended.
+     */
+    public function suspendService($package, $service, $parent_package = null, $parent_service = null)
+    {
+        $row = $this->getModuleRow($package->module_row);
+        $api = $this->getApi($row->meta->api_key);
+
+        if ($package->meta->type == 'domain') {
+            $fields = $this->serviceFieldsToObject($service->fields);
+
+            // Make sure auto renew is off
+            $domains = new DynadotDomains($api);
+            $response = $domains->setAutoRenewal($fields->{'domain'}, false);
+            $this->processResponse($api, $response);
+
+            if ($this->Input->errors()) {
+                return;
+            }
+        }
+
+        return;
+    }
+
+    /**
+     * Allows the module to perform an action when the service is ready to renew.
+     * Sets Input errors on failure, preventing the service from renewing.
+     *
+     * @param stdClass $package A stdClass object representing the current package
+     * @param stdClass $service A stdClass object representing the current service
+     * @param stdClass $parent_package A stdClass object representing the parent service's selected package
+     *  (if the current service is an addon service)
+     * @param stdClass $parent_service A stdClass object representing the parent service of the service being renewed
+     *  (if the current service is an addon service)
+     * @return mixed null to maintain the existing meta fields or a numerically indexed array of meta fields to be
+     *  stored for this service containing:
+     *
+     *      - key The key for this meta field
+     *      - value The value for this key
+     *      - encrypted Whether or not this field should be encrypted (default 0, not encrypted)
+     * @see Module::getModule()
+     * @see Module::getModuleRow()
+     */
+    public function renewService($package, $service, $parent_package = null, $parent_service = null, $years = null)
+    {
+        $row = $this->getModuleRow($package->module_row);
+        $api = $this->getApi($row->meta->api_key);
+
+        if ($package->meta->type == 'domain') {
+            $fields = $this->serviceFieldsToObject($service->fields);
+
+            $domain = $fields->{'domain'};
+            $duration = 1;
+
+            if (!$years) {
+                foreach ($package->pricing as $pricing) {
+                    if ($pricing->id == $service->pricing_id) {
+                        $duration = $pricing->term;
+                        break;
+                    }
+                }
+            } else {
+                $duration = $years;
+            }
+
+            $domains = new DynadotDomains($api);
+            $response = $domains->renew($domain, $duration);
+            $this->processResponse($api, $response);
+
+            if ($this->Input->errors()) {
+                return;
+            }
+        }
+
+        return null;
+    }
+
 
     /**
      * Returns all fields used when adding/editing a package, including any
@@ -496,6 +834,481 @@ class Dynadot extends RegistrarModule
         return $fields;
     }
 
+    /**
+     * Returns all fields to display to an admin attempting to add a service with the module
+     *
+     * @param stdClass $package A stdClass object representing the selected package
+     * @param $vars stdClass A stdClass object representing a set of post fields
+     * @return ModuleFields A ModuleFields object, containg the fields to render as well as any additional
+     *  HTML markup to include
+     */
+    public function getAdminAddFields($package, $vars = null)
+    {
+        Loader::loadHelpers($this, ['Form', 'Html']);
+
+        if ($package->meta->type == 'domain') {
+            // Set default name servers
+            if (!isset($vars->ns1) && isset($package->meta->ns)) {
+                $i = 1;
+                foreach ($package->meta->ns as $ns) {
+                    $vars->{'ns' . $i++} = $ns;
+                }
+            }
+
+            // Handle transfer request
+            if ((isset($vars->transfer) && $vars->transfer) || (isset($vars->auth) && $vars->auth)) {
+                return $this->arrayToModuleFields(Configure::get('Dynadot.transfer_fields'), null, $vars);
+            } else {
+                // Handle domain registration
+                #
+                # TODO: Select TLD, then display additional fields
+                #
+
+                $fields = Configure::get('Dynadot.transfer_fields');
+
+                $fields['transfer'] = [
+                    'label' => Language::_('Dynadot.domain.DomainAction', true),
+                    'type' => 'radio',
+                    'value' => '1',
+                    'options' => [
+                        '0' => 'Register',
+                        '1' => 'Transfer',
+                    ],
+                ];
+
+                $fields['auth'] = [
+                    'label' => Language::_('Dynadot.transfer.EPPCode', true),
+                    'type' => 'text',
+                ];
+
+                $module_fields = $this->arrayToModuleFields(
+                    array_merge($fields, Configure::get('Dynadot.nameserver_fields')),
+                    null,
+                    $vars
+                );
+
+                $module_fields->setHtml(
+                    "
+                    <script type=\"text/javascript\">
+                        $(document).ready(function() {
+                            $('#transfer_id_0').prop('checked', true);
+                            $('#auth_id').closest('li').hide();
+                            // Set whether to show or hide the ACL option
+                            $('#auth').closest('li').hide();
+                            if ($('input[name=\"transfer\"]:checked').val() == '1') {
+                                $('#auth_id').closest('li').show();
+                            }
+
+                            $('input[name=\"transfer\"]').change(function() {
+                                if ($('input[name=\"transfer\"]:checked').val() == '1') {
+                                    $('#auth_id').closest('li').show();
+                                    $('#ns1_id').closest('li').hide();
+                                    $('#ns2_id').closest('li').hide();
+                                    $('#ns3_id').closest('li').hide();
+                                    $('#ns4_id').closest('li').hide();
+                                    $('#ns5_id').closest('li').hide();
+                                } else {
+                                    $('#auth_id').closest('li').hide();
+                                    $('#ns1_id').closest('li').show();
+                                    $('#ns2_id').closest('li').show();
+                                    $('#ns3_id').closest('li').show();
+                                    $('#ns4_id').closest('li').show();
+                                    $('#ns5_id').closest('li').show();
+                                }
+                            });
+
+                            $('input[name=\"transfer\"]').change();
+                        });
+                    </script>"
+                );
+
+                // Build the domain fields
+                $fields = $this->buildDomainModuleFields($vars);
+                if ($fields) {
+                    $module_fields = $fields;
+                }
+            }
+        }
+
+        return (isset($module_fields) ? $module_fields : new ModuleFields());
+    }
+
+    /**
+     * Returns all fields to display to a client attempting to add a service with the module
+     *
+     * @param stdClass $package A stdClass object representing the selected package
+     * @param $vars stdClass A stdClass object representing a set of post fields
+     * @return ModuleFields A ModuleFields object, containg the fields to render as well as any additional
+     *  HTML markup to include
+     */
+    public function getClientAddFields($package, $vars = null)
+    {
+
+        // Handle universal domain name
+        if (isset($vars->domain)) {
+            $vars->domain = $vars->domain;
+        }
+
+        if ($package->meta->type == 'domain') {
+            // Set default name servers
+            if (!isset($vars->ns) && isset($package->meta->ns)) {
+                $i = 1;
+                foreach ($package->meta->ns as $ns) {
+                    $vars->{'ns' . $i++} = $ns;
+                }
+            }
+
+            if (isset($vars->domain)) {
+                $tld = $this->getTld($vars->domain);
+            }
+
+            // Handle transfer request
+            if ((isset($vars->transfer) && $vars->transfer) || isset($vars->auth)) {
+                $fields = array_merge(
+                    Configure::get('Dynadot.transfer_fields'),
+                    (array) Configure::get('Dynadot.domain_fields' . $tld)
+                );
+
+                // .ca domains can't have traditional whois privacy
+                if ($tld == '.ca') {
+                    unset($fields['private']);
+                }
+
+                // We should already have the domain name don't make editable
+                $fields['domain']['type'] = 'hidden';
+                $fields['domain']['label'] = null;
+                // we already know we're doing a transfer, don't make it editable
+                $fields['transfer']['type'] = 'hidden';
+                $fields['transfer']['label'] = null;
+
+                $module_fields = $this->arrayToModuleFields($fields, null, $vars);
+
+                return $module_fields;
+            } else {
+                // Handle domain registration
+                $fields = array_merge(
+                    Configure::get('Dynadot.nameserver_fields'),
+                    Configure::get('Dynadot.domain_fields'),
+                    (array) Configure::get('Dynadot.domain_fields' . $tld)
+                );
+
+                // .ca domains can't have traditional whois privacy
+                if ($tld == '.ca') {
+                    unset($fields['private']);
+                }
+
+                // We should already have the domain name don't make editable
+                $fields['domain']['type'] = 'hidden';
+                $fields['domain']['label'] = null;
+
+                $module_fields = $this->arrayToModuleFields($fields, null, $vars);
+            }
+        }
+
+        // Determine whether this is an AJAX request
+        return (isset($module_fields) ? $module_fields : new ModuleFields());
+    }
+
+    /**
+     * Builds and returns the module fields for domain registration
+     *
+     * @param stdClass $vars An stdClass object representing the input vars
+     * @param $client True if rendering the client view, or false for the admin (optional, default false)
+     * return mixed The module fields for this service, or false if none could be created
+     */
+    private function buildDomainModuleFields($vars, $client = false)
+    {
+        if (isset($vars->domain)) {
+            $tld = $this->getTld($vars->domain);
+
+            $extension_fields = Configure::get('Dynadot.domain_fields' . $tld);
+            if ($extension_fields) {
+                // Set the fields
+                $fields = array_merge(Configure::get('Dynadot.domain_fields'), $extension_fields);
+
+                if (!isset($vars->transfer) || $vars->transfer == '0') {
+                    $fields = array_merge($fields, Configure::get('Dynadot.nameserver_fields'));
+                } else {
+                    $fields = array_merge($fields, Configure::get('Dynadot.transfer_fields'));
+                }
+
+                if ($client) {
+                    // We should already have the domain name don't make editable
+                    $fields['domain']['type'] = 'hidden';
+                    $fields['domain']['label'] = null;
+                }
+
+                // Build the module fields
+                $module_fields = new ModuleFields();
+
+                // Allow AJAX requests
+                $ajax = $module_fields->fieldHidden('allow_ajax', 'true', ['id' => 'dynadot_allow_ajax']);
+                $module_fields->setField($ajax);
+                $please_select = ['' => Language::_('AppController.select.please', true)];
+
+                foreach ($fields as $key => $field) {
+                    // Build the field
+                    $label = $module_fields->label((isset($field['label']) ? $field['label'] : ''), $key);
+
+                    $type = null;
+                    if ($field['type'] == 'text') {
+                        $type = $module_fields->fieldText(
+                            $key,
+                            (isset($vars->{$key}) ? $vars->{$key} :
+                                (isset($field['options']) ? $field['options'] : '')),
+                            ['id' => $key]
+                        );
+                    } elseif ($field['type'] == 'select') {
+                        $type = $module_fields->fieldSelect(
+                            $key,
+                            (isset($field['options']) ? $please_select + $field['options'] : $please_select),
+                            (isset($vars->{$key}) ? $vars->{$key} : ''),
+                            ['id' => $key]
+                        );
+                    } elseif ($field['type'] == 'checkbox') {
+                        $type = $module_fields->fieldCheckbox($key, (isset($field['options']) ? $field['options'] : 1));
+                        $label = $module_fields->label((isset($field['label']) ? $field['label'] : ''), $key);
+                    } elseif ($field['type'] == 'hidden') {
+                        $type = $module_fields->fieldHidden(
+                            $key,
+                            (isset($vars->{$key}) ? $vars->{$key} :
+                                (isset($field['options']) ? $field['options'] : '')),
+                            ['id' => $key]
+                        );
+                    }
+
+                    // Include a tooltip if set
+                    if (!empty($field['tooltip'])) {
+                        $label->attach($module_fields->tooltip($field['tooltip']));
+                    }
+
+                    if ($type) {
+                        $label->attach($type);
+                        $module_fields->setField($label);
+                    }
+                }
+            }
+        }
+
+        return (isset($module_fields) ? $module_fields : false);
+    }
+
+    /**
+     * Returns all fields to display to an admin attempting to edit a service with the module
+     *
+     * @param stdClass $package A stdClass object representing the selected package
+     * @param $vars stdClass A stdClass object representing a set of post fields
+     * @return ModuleFields A ModuleFields object, containg the fields to render as well as any additional
+     *  HTML markup to include
+     */
+    public function getAdminEditFields($package, $vars = null)
+    {
+        Loader::loadHelpers($this, ['Html']);
+
+        $fields = new ModuleFields();
+
+        // Create domain label
+        $domain = $fields->label(Language::_('Dynadot.manage.manual_renewal', true), 'renew');
+        // Create domain field and attach to domain label
+        $domain->attach(
+            $fields->fieldSelect(
+                'renew',
+                [0, '1 year', '2 years', '3 years', '4 years', '5 years'],
+                (isset($vars->renew) ? $vars->renew : null),
+                ['id' => 'renew']
+            )
+        );
+        // Set the label as a field
+        $fields->setField($domain);
+
+        return $fields;
+    }
+
+    /**
+     * Fetches the HTML content to display when viewing the service info in the
+     * admin interface.
+     *
+     * @param stdClass $service A stdClass object representing the service
+     * @param stdClass $package A stdClass object representing the service's package
+     * @return string HTML content containing information to display when viewing the service info
+     */
+    public function getAdminServiceInfo($service, $package)
+    {
+        return '';
+    }
+
+    /**
+     * Fetches the HTML content to display when viewing the service info in the
+     * client interface.
+     *
+     * @param stdClass $service A stdClass object representing the service
+     * @param stdClass $package A stdClass object representing the service's package
+     * @return string HTML content containing information to display when viewing the service info
+     */
+    public function getClientServiceInfo($service, $package)
+    {
+        return '';
+    }
+
+    /**
+     * Returns all tabs to display to an admin when managing a service
+     *
+     * @param stdClass $service A stdClass object representing the service
+     * @return array An array of tabs in the format of method => title.
+     *  Example: ['methodName' => "Title", 'methodName2' => "Title2"]
+     */
+    public function getAdminServiceTabs($service)
+    {
+        Loader::loadModels($this, ['Packages']);
+
+        $package = $this->Packages->get($service->package_id ?? $service->package->id);
+
+        if ($package->meta->type == 'domain') {
+            $tabs = [
+                'tabWhois' => Language::_('Dynadot.tab_whois.title', true),
+                'tabEmailForwarding' => Language::_('Dynadot.tab_email_forwarding.title', true),
+                'tabNameservers' => Language::_('Dynadot.tab_nameservers.title', true),
+                'tabHosts' => Language::_('Dynadot.tab_hosts.title', true),
+                'tabDnssec' => Language::_('Dynadot.tab_dnssec.title', true),
+                'tabDnsRecords' => Language::_('Dynadot.tab_dnsrecord.title', true),
+                'tabSettings' => Language::_('Dynadot.tab_settings.title', true),
+                'tabAdminActions' => Language::_('Dynadot.tab_adminactions.title', true),
+            ];
+
+            // Check if DNS Management is enabled
+            if (!$this->featureServiceEnabled('dns_management', $service)) {
+                unset($tabs['tabDnssec'], $tabs['tabDnsRecords']);
+            }
+
+            // Check if Email Forwarding is enabled
+            if (!$this->featureServiceEnabled('email_forwarding', $service)) {
+                unset($tabs['tabEmailForwarding']);
+            }
+
+            return $tabs;
+        }
+    }
+
+    /**
+     * Returns all tabs to display to a client when managing a service.
+     *
+     * @param stdClass $service A stdClass object representing the service
+     * @return array An array of tabs in the format of method => title, or method => array where array contains:
+     *
+     *  - name (required) The name of the link
+     *  - icon (optional) use to display a custom icon
+     *  - href (optional) use to link to a different URL
+     *      Example:
+     *      ['methodName' => "Title", 'methodName2' => "Title2"]
+     *      ['methodName' => ['name' => "Title", 'icon' => "icon"]]
+     */
+    public function getClientServiceTabs($service)
+    {
+        Loader::loadModels($this, ['Packages']);
+
+        $package = $this->Packages->get($service->package_id ?? $service->package->id);
+
+        if ($package->meta->type == 'domain') {
+            $tabs = [
+                'tabClientWhois' => [
+                    'name' => Language::_('Dynadot.tab_whois.title', true),
+                    'icon' => 'fas fa-users'
+                ],
+                'tabClientEmailForwarding' => [
+                    'name' => Language::_('Dynadot.tab_email_forwarding.title', true),
+                    'icon' => 'fas fa-envelope'
+                ],
+                'tabClientNameservers' => [
+                    'name' => Language::_('Dynadot.tab_nameservers.title', true),
+                    'icon' => 'fas fa-server'
+                ],
+                'tabClientHosts' => [
+                    'name' => Language::_('Dynadot.tab_hosts.title', true),
+                    'icon' => 'fas fa-hdd'
+                ],
+                'tabClientDnssec' => [
+                    'name' => Language::_('Dynadot.tab_dnssec.title', true),
+                    'icon' => 'fas fa-globe-americas'
+                ],
+                'tabClientDnsRecords' => [
+                    'name' => Language::_('Dynadot.tab_dnsrecord.title', true),
+                    'icon' => 'fas fa-sitemap'
+                ],
+                'tabClientSettings' => [
+                    'name' => Language::_('Dynadot.tab_settings.title', true),
+                    'icon' => 'fas fa-cog'
+                ]
+            ];
+
+            // Check if DNS Management is enabled
+            if (!$this->featureServiceEnabled('dns_management', $service)) {
+                unset($tabs['tabClientDnssec'], $tabs['tabClientDnsRecords']);
+            }
+
+            // Check if Email Forwarding is enabled
+            if (!$this->featureServiceEnabled('email_forwarding', $service)) {
+                unset($tabs['tabClientEmailForwarding']);
+            }
+
+            return $tabs;
+        }
+    }
+
+    /**
+     * Admin Actions tab
+     *
+     * @param stdClass $package A stdClass object representing the current package
+     * @param stdClass $service A stdClass object representing the current service
+     * @param array $get Any GET parameters
+     * @param array $post Any POST parameters
+     * @param array $files Any FILES parameters
+     * @return string The string representing the contents of this tab
+     */
+    public function tabAdminActions($package, $service, array $get = null, array $post = null, array $files = null)
+    {
+        $vars = new stdClass();
+
+        Loader::load(__DIR__ . DS . 'includes' . DS . 'communication.php');
+
+        $communication = new Communication($service);
+
+        $vars->options = $communication->getNotices();
+
+        if (!empty($post)) {
+            $fields = $this->serviceFieldsToObject($service->fields);
+            $row = $this->getModuleRow($package->module_row);
+            $api = $this->getApi($row->meta->api_key);
+            $domains = new DynadotDomains($api);
+
+            if (!empty($post['notice'])) {
+                $communication->send($post);
+            }
+
+            if (isset($post['action']) && $post['action'] == 'sync_date') {
+                Loader::loadModels($this, ['Services']);
+
+                $domain_info = $domains->getDomainInfo($fields->domain);
+                $this->processResponse($api, $domain_info);
+
+                if (!$this->Input->errors()) {
+                    $domain_info = $domain_info->response();
+                    $expires = $domain_info->DomainInfoResponse->DomainInfo->Expiration;
+                    $edit_vars['date_renews'] = date('Y-m-d h:i:s', strtotime($expires));
+                    $this->Services->edit($service->id, $edit_vars, $bypass_module = true);
+                }
+            }
+        }
+
+        $this->view = new View('tab_admin_actions', 'default');
+
+        Loader::loadHelpers($this, ['Form', 'Html']);
+
+        $this->view->set('vars', $vars);
+        $this->view->setDefaultView(self::$defaultModuleView);
+
+        return $this->view->fetch();
+    }
+
 
     /**
      * Validates input data when attempting to add a package, returns the meta
@@ -600,29 +1413,6 @@ class Dynadot extends RegistrarModule
         return $rules;
     }
 
-     /**
-     * Edits the service on the remote server. Sets Input errors on failure,
-     * preventing the service from being edited.
-     *
-     * @param stdClass $package A stdClass object representing the current package
-     * @param stdClass $service A stdClass object representing the current service
-     * @param array $vars An array of user supplied info to satisfy the request
-     * @param stdClass $parent_package A stdClass object representing the parent
-     *  service's selected package (if the current service is an addon service)
-     * @param stdClass $parent_service A stdClass object representing the parent
-     *  service of the service being edited (if the current service is an addon service)
-     * @return array A numerically indexed array of meta fields to be stored for this service containing:
-     *  - key The key for this meta field
-     *  - value The value for this key
-     *  - encrypted Whether or not this field should be encrypted (default 0, not encrypted)
-     * @see Module::getModule()
-     * @see Module::getModuleRow()
-     */
-    public function editService($package, $service, array $vars = null, $parent_package = null, $parent_service = null)
-    {
-        return null; // All this handled by admin/client tabs instead
-    }
-
 
     /**
      * Attempts to validate service info. This is the top-level error checking method. Sets Input errors on failure.
@@ -673,8 +1463,25 @@ class Dynadot extends RegistrarModule
                     },
                     'message' => Language::_('Dynadot.!error.domain.valid', true)
                 ]
-            ],
-            'ns' => [
+            ]
+        ];
+
+        // Transfers (EPP Code)
+        if (isset($vars['transfer']) && ($vars['transfer'] == '1' || $vars['transfer'] == true)) {
+            $rule = [
+                'auth' => [
+                    'empty' => [
+                        'rule' => ['isEmpty'],
+                        'negate' => true,
+                        'message' => Language::_('Dynadot.!error.epp.empty', true),
+                        'post_format' => 'trim'
+                    ]
+                ],
+            ];
+            $rules = array_merge($rules, $rule);
+        }
+
+        /*'ns' => [
                 'count'=>[
                     'rule' => [[$this, 'validateNameServerCount']],
                     'message' => Language::_('Dynadot.!error.ns_count', true)
@@ -683,8 +1490,7 @@ class Dynadot extends RegistrarModule
                     'rule'=>[[$this, 'validateNameServers']],
                     'message' => Language::_('Dynadot.!error.ns_valid', true)
                 ]
-            ]
-        ];
+            ]*/
 
         return $rules;
     }
@@ -741,6 +1547,39 @@ class Dynadot extends RegistrarModule
         }
 
         return false;
+    }
+
+    /**
+     * Gets the domain expiration date
+     *
+     * @param stdClass $service The service belonging to the domain to lookup
+     * @param string $format The format to return the expiration date in
+     * @return string The domain expiration date in UTC time in the given format
+     * @see Services::get()
+     */
+    public function getExpirationDate($service, $format = 'Y-m-d H:i:s')
+    {
+        Loader::loadHelpers($this, ['Date']);
+
+        $domain = $this->getServiceDomain($service);
+        $module_row_id = $service->module_row_id ?? null;
+
+        $row = $this->getModuleRow($module_row_id);
+        $api = $this->getApi($row->meta->api_key);
+
+        $domains = new DynadotDomains($api);
+        $result = $domains->getDomainInfo($domain);
+        $this->processResponse($api, $result);
+        $response = $result->response();
+
+        if ($response->DomainInfoResponse->ResponseCode == -1) {
+            return false;
+        }
+
+        return $this->Date->format(
+            $format,
+            isset($response->DomainInfoResponse->DomainInfo->Expiration) ? $response->DomainInfoResponse->DomainInfo->Expiration : date('c')
+        );
     }
 
     /**
