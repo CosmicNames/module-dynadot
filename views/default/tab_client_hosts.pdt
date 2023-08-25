@@ -3,15 +3,15 @@
             <?php
             $this->Form->create();
             ?>
-                <h4><?php $this->_('Namesilo.tab_hosts.title'); ?></h4>
-                <p class="mb-2"><?php $this->_('Namesilo.tab_hosts.desc'); ?></p>
+                <h4><?php $this->_('Dynadot.tab_hosts.title'); ?></h4>
+                <p class="mb-2"><?php $this->_('Dynadot.tab_hosts.desc'); ?></p>
 
                 <div class="table-responsive my-2">
                     <table class="table table-curved table-striped-alt">
                         <thead>
                             <tr>
-                                <th><?php $this->_('Namesilo.tab_hosts.field_hostname'); ?></th>
-                                <th><?php $this->_('Namesilo.tab_hosts.field_ip'); ?></th>
+                                <th><?php $this->_('Dynadot.tab_hosts.field_hostname'); ?></th>
+                                <th><?php $this->_('Dynadot.tab_hosts.field_ip'); ?></th>
                             </tr>
                         </thead>
 
@@ -30,7 +30,7 @@
                                     }
                                 ?>
                                 <tr>
-                                    <td class="text-muted"></td>
+                                    <td<?php echo $index !== 0 ? ' class="text-muted"' : ''; ?>><?php echo $host->host; ?></td>
                                     <td><?php $this->Form->fieldText('hosts[' . (isset($host->host) ? $host->host : null) . '][]'); ?></td>
                                 </tr>
                             </tbody>
@@ -48,7 +48,7 @@
                 </div>
 
                 <button class="btn btn-light float-right" type="submit">
-                    <i class="fas fa-edit"></i> <?php $this->_('Namesilo.tab_hosts.field_submit'); ?>
+                    <i class="fas fa-edit"></i> <?php $this->_('Dynadot.tab_hosts.field_submit'); ?>
                 </button>
             <?php
             $this->Form->end();

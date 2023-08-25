@@ -14,6 +14,9 @@
                 <?php $this->Form->fieldHidden('action', 'sync_date'); ?>
                 <div class="button_row"><a class="btn btn-primary submit" href="#"><?php $this->_('Dynadot.tab_adminactions.sync_date'); ?></a></div>
             </li>
+            <?php
+            $this->Form->end();
+            ?>
         </ul>
 
     </div>

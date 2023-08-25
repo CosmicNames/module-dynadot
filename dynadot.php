@@ -252,6 +252,82 @@ class Dynadot extends RegistrarModule
     }
 
     /**
+     * Since the api only returns XML sometimes the return array/object changes based on the XML
+     *
+     * @param stdClass $package An stdClass object representing the package
+     * @param stdClass $service An stdClass object representing the service
+     */
+    private function getRegisteredHosts($package, $service)
+    {
+        $fields = $this->serviceFieldsToObject($service->fields);
+
+        $row = $this->getModuleRow($package->module_row);
+        $api = $this->getApi($row->meta->api_key);
+        $ns = new DynadotDomainsNs($api);
+
+        $response = $ns->getInfo($fields->domain);
+        $host_obj = new stdClass();
+        $hosts = [];
+
+        $results = $response->response();
+
+        if (isset($results->GetNsResponse->NsContent)) {
+            foreach ($results->GetNsResponse->NsContent as $host) {
+                if ($host === 'Name Servers') continue;
+                $host_obj->host = $host;
+                $host_obj->ip = [];
+                $hosts[] = $host_obj;
+                $host_obj = new stdClass();
+            }
+        }
+
+        return $hosts;
+    }
+
+    /**
+     * Handle updating host information
+     *
+     * @param string $view The name of the view to fetch
+     * @param stdClass $package An stdClass object representing the package
+     * @param stdClass $service An stdClass object representing the service
+     * @param array $get Any GET arguments (optional)
+     * @param array $post Any POST arguments (optional)
+     * @param array $files Any FILES data (optional)
+     * @return string The rendered view
+     */
+    private function manageHosts($view, $package, $service, array $get = null, array $post = null, array $files = null)
+    {
+        $vars = new stdClass();
+
+        // if the domain is pending transfer display a notice of such
+        /*$checkDomainStatus = $this->checkDomainStatus($service, $package);
+        if (isset($checkDomainStatus)) {
+            return $checkDomainStatus;
+        }*/
+
+        $this->view = new View($view, 'default');
+        $this->view->base_uri = $this->base_uri;
+
+        // Load the helpers required for this view
+        Loader::loadHelpers($this, ['Form', 'Html']);
+
+        $row = $this->getModuleRow($package->module_row);
+        $api = $this->getApi($row->api_key);
+        $ns = new DynadotDomainsNs($api);
+
+        $fields = $this->serviceFieldsToObject($service->fields);
+        $this->view->set('domain', $fields->domain);
+
+        $vars->hosts = $this->getRegisteredHosts($package, $service);
+        $this->view->set('vars', $vars);
+        $this->view->set('client_id', $service->client_id);
+        $this->view->set('service_id', $service->id);
+        $this->view->setDefaultView(self::$defaultModuleView);
+
+        return $this->view->fetch();
+    }
+
+    /**
      * Returns the TLD of the given domain
      *
      * @param string $domain The domain to return the TLD from
@@ -1515,6 +1591,36 @@ class Dynadot extends RegistrarModule
         }
 
         return false;
+    }
+
+    /**
+     * Admin Hosts tab
+     *
+     * @param stdClass $package A stdClass object representing the current package
+     * @param stdClass $service A stdClass object representing the current service
+     * @param array $get Any GET parameters
+     * @param array $post Any POST parameters
+     * @param array $files Any FILES parameters
+     * @return string The string representing the contents of this tab
+     */
+    public function tabHosts($package, $service, array $get = null, array $post = null, array $files = null)
+    {
+        return $this->manageHosts('tab_hosts', $package, $service, $get, $post, $files);
+    }
+
+    /**
+     * Client Hosts tab
+     *
+     * @param stdClass $package A stdClass object representing the current package
+     * @param stdClass $service A stdClass object representing the current service
+     * @param array $get Any GET parameters
+     * @param array $post Any POST parameters
+     * @param array $files Any FILES parameters
+     * @return string The string representing the contents of this tab
+     */
+    public function tabClientHosts($package, $service, array $get = null, array $post = null, array $files = null)
+    {
+        return $this->manageHosts('tab_client_hosts', $package, $service, $get, $post, $files);
     }
 
     /**
